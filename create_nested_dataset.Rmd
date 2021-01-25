@@ -1,0 +1,381 @@
+---
+title: "Nested table"
+output: html_notebook
+---
+
+```{r setup}
+library(tidyverse)
+library(haven)
+library(gt)
+library(runner)
+setwd("C:/Users/brown/Desktop/who_switched_to_cycling")
+```
+
+Set values to extract:
+
+```{r}
+ttw_vars <- tibble(number =  rep(c(1:10, 97), 2),
+                     name =  rep(c("Drive myself by car or van", 
+                                   "Get a lift with someone from household",
+                                   "Get a lift with someone outside the household",
+                                   "Motorcycle/moped/scooter",
+                                   "Taxi/minicab",
+                                   "Bus/coach",
+                                   "Train",
+                                   "Underground/Metro/Tram/Light railway",
+                                   "Cycle",
+                                   "Walk",
+                                   "Other"), 2)) %>%
+  rowid_to_column() %>%
+  mutate(code = case_when(rowid > 11 ~ paste0("jswktrv", number),
+                                TRUE ~ paste0("wktrv", number))) %>%
+  select(code, name)
+
+variables <- tribble(~code,           ~name,                                   
+                      "pidp",        "Unique cross-wave person identifier",           
+                      "intdatm_dv",  "Interview date: Month",                            
+                      "intdaty_dv",  "Interview date: Year",                          
+                      "gor_dv",      "Region in the UK",                             
+                      "age_dv",      "Age at time of interview",                       
+                      "sex_dv",      "Sex",                                       
+                      "hiqual_dv",   "Highest qualification",                        
+                      "ethn_dv",     "Ethnic group",                                  
+                      "jbnssec8_dv", "Current job: Eight Class NS-SEC",          
+                      "jbstat",      "Employment status",                                      
+                      "workdis",     "Distance to work",                                     
+                      "jsworkdis",   "Distance to work",                                         
+                      "addrmov_dv",  "Participant changes address postcode since last wave",
+                      "adcts",       "Lived continuously at this address since last interview",
+                      "distmov_dv",  "Distance participant moved since last wave (km)",
+                      "trbikefq",    "Frequency of using a bicycle",
+                      "worktrav",    "Method of travel to work",
+                      "jsworktrav",  "Method of travel to work (self-employed)",
+                      "wktrvfar",    "Main mode of transport to work",
+                      "jswktrvfar",  "Method of travel to work (self-employed)",
+                      "jbpl",        "work location",
+                      "jspl",        "work location (self-employed)",
+                      "jbsamr",      "same employer check",
+                      "wkplsam",     "same workplace check",
+                      "ff_emplw",    "employed at last wave",
+                      "employ",      "employed at this wave") %>%
+  bind_rows(ttw_vars)
+
+waves <- tibble(number = 1:10, 
+                letter = letters[number])
+```
+
+Extract data:
+
+```{r}
+na_nums <- c(-1, -2, -7, -8, -9, -10, -11, -20, -21)
+root <- "usd/UKDA-6614-spss/spss/spss25"
+list <- NULL
+list$all <- NULL
+wave_code <- NULL
+
+for(i in 1:nrow(waves)) {
+  num <- as.numeric(waves[i, 1])
+  let <- as.character(waves[i, 2])
+  folder <- paste0("ukhls_w", num)
+  filename <- paste0(let, "_indresp.sav")
+  wave_code <- variables %>%
+    mutate(wave_code = case_when(code == "pidp" ~ "pidp",
+                                           TRUE ~ paste0(let, "_", code))) %>%
+    pull(wave_code)
+  
+  path <- paste(root, folder, filename, sep = "/")
+  
+  list[[let]] <- read_sav(path) %>%
+    select(any_of(wave_code)) %>%
+    rename_with(~str_replace(.x, paste0("^", let, "_"), "")) %>%
+    mutate_all(~replace(., . %in% na_nums, NA)) %>%
+    mutate_at(vars(contains("workdis"))   , as.numeric,
+              vars(contains("distmov_dv")), as.numeric) %>%
+    mutate(intdatm_dv = as.numeric(intdatm_dv),
+           intdaty_dv = as.numeric(intdaty_dv),
+           age_dv     = as.numeric(age_dv),
+           wave       = let) %>%
+    mutate_if(is.labelled, ~ as_factor(.)) %>%
+    mutate_if(is.factor, as.character)
+  
+  print(paste0("Done with wave ", let))
+}
+```
+
+Wave J inconsistencies ...
+
+```{r}
+# Set values ...
+js_codes    <- ttw_vars$code %>% str_subset("^js")     # Get the self-employed codes
+other_codes <- ttw_vars$code %>% str_subset("^w")      # Get the other codes
+ttw_vec     <- setNames(ttw_vars$name, ttw_vars$code)  # Get lookup from var names to modes
+
+# This next bit first deals with the ttw fields, and then the fed forward unemployment status ...
+list$j <- list$j %>%
+  mutate_at(vars(one_of(ttw_vars$code)), funs(ifelse(. == "Yes mentioned", deparse(substitute(.)), NA))) %>%
+  mutate(jsworktrav = case_when(!is.na(jswktrvfar) ~ jswktrvfar,
+                                             TRUE  ~ ttw_vec[coalesce(!!!syms(js_codes))]),
+         worktrav   = case_when(!is.na(wktrvfar)   ~ wktrvfar,
+                                             TRUE  ~ ttw_vec[coalesce(!!!syms(other_codes))]),
+         ff_emplw = case_when(ff_emplw == 1 ~	"yes",
+                              ff_emplw == 2 ~	"no")) %>%
+  select(-one_of(ttw_vars$code), -wktrvfar, -jswktrvfar)
+```
+
+Sort out inconsistencies in data names between waves ...
+
+```{r}
+all_cases <- bind_rows(list) %>%
+  mutate(distmov_dv = as.numeric(distmov_dv),
+         jbstat = str_replace_all(str_to_lower(jbstat), " |\\(|\\)|/", "_"),
+         jbstat = str_remove(jbstat, "_$")) %>%
+  mutate_if(is.character, ~ str_replace_all(str_to_lower(.), " |\\(|\\)|/|\\&|\\'|\\'|,", "_")) %>%
+  mutate(hiqual_dv = str_replace(hiqual_dv, "qualification", "qual"),
+         hiqual_dv = case_when(hiqual_dv == "other_higher" ~ "other_higher_degree",
+                                                      TRUE ~ hiqual_dv),
+         ethn_dv = case_when(ethn_dv == 56 ~ as.character(NA),
+                                      TRUE ~ ethn_dv),
+         worktrav = str_remove(worktrav, "_\\{if_region_=_gb\\}|__if_england_scotland_wales_"),
+         worktrav = str_remove(worktrav, "^_|_$"),
+         worktrav = case_when(worktrav == "tf_emplmetro" ~ "underground_metro_tram_light_railway",
+                                                    TRUE ~ worktrav),
+         jsworktrav = str_remove(jsworktrav, "_\\{if_region_=_gb\\}|__if_england_scotland_wales_"),
+         jsworktrav = str_remove(jsworktrav, "^_|_$"),
+         jsworktrav = case_when(jsworktrav == "tf_emplmetro"                                  ~ "underground_metro_tram_light_railway",
+                                jsworktrav == "tf_selfemplmetro"                              ~ "underground_metro_tram_light_railway",
+                                jsworktrav == "get_a_lift_from_someone_outside_the_household" ~ "get_a_lift_with_someone_outside_the_household",
+                                                                                         TRUE ~ jsworktrav),
+         jbpl = case_when(jbpl == 5                    ~ "spontaneous_other",
+                          jbpl == "from_your_own_home" ~ "at_home",
+                                                  TRUE ~ jbpl),
+         jbpl = str_remove(jbpl, "\\?"),
+         jspl = case_when(jspl == "from_your_own_home"  ~ "at_home",
+                          jspl == "from_their_own_home" ~ "at_home",
+                                                  TRUE  ~ jspl),
+         jspl = str_remove(jspl, "\\?"),
+         ff_emplw = case_when(ff_emplw == "in_paid_employment"     ~ "yes",
+                              ff_emplw == "not_in_paid_employment" ~ "no",
+                                                              TRUE ~ ff_emplw))
+```
+
+Create a simplified commuting variable ... 
+
+```{r}
+# Commuting vals ...
+employed_vals <- c("paid_employment_ft_pt", "self_employed")
+wfh_vals <- c("at_home")
+many_places_vals <- c("or_at_one_or_more_other_places", "driving_or_travelling_around", "from_client_s_or_customer_s_premises", "spontaneous_other")
+car_vals <- c("drive_myself_by_car_or_van", "get_a_lift_with_someone_outside_the_household", "get_a_lift_with_someone_from_household", "taxi_minicab")
+pt_vals <- c("bus_coach", "underground_metro_tram_light_railway", "train")
+other_vals <- c("other_non_commuter", "motorcycle_moped_scooter", "other")
+
+simplified_data <- all_cases %>%
+  mutate(commute_status_detailed = case_when(
+                                    !jbstat %in% employed_vals                                     ~ "not_in_employment",
+                                    jbstat == "self_employed" & jspl %in% wfh_vals                 ~ "work_from_home",
+                                    jbstat == "paid_employment_ft_pt" & jbpl %in% wfh_vals         ~ "work_from_home",
+                                    jbstat == "self_employed" & !is.na(jsworktrav)                 ~ jsworktrav,
+                                    jbstat == "paid_employment_ft_pt" & !is.na(worktrav)           ~ worktrav,
+                                    jbstat == "self_employed" & jspl %in% many_places_vals         ~ "other_non_commuter",
+                                    jbstat == "paid_employment_ft_pt" & jbpl %in% many_places_vals ~ "other_non_commuter",
+                                    jbstat == "self_employed" & !is.na(worktrav)                   ~ worktrav,
+                                    jbstat == "paid_employment_ft_pt" & !is.na(jsworktrav)         ~ jsworktrav,
+                                    jbstat == "self_employed" & jbpl %in% wfh_vals                 ~ "work_from_home",
+                                    jbstat == "paid_employment_ft_pt" & jspl %in% wfh_vals         ~ "work_from_home",
+                                    jbstat == "self_employed" & jbpl %in% many_places_vals         ~ "other_non_commuter",
+                                    jbstat == "self_employed" & jspl %in% many_places_vals         ~ "other_non_commuter"),
+         commute_status_simp = case_when(
+                                    commute_status_detailed %in% car_vals   ~ "car",
+                                    commute_status_detailed %in% pt_vals    ~ "public_transport",
+                                    commute_status_detailed %in% other_vals ~ "other",
+                                                                       TRUE ~ commute_status_detailed),
+         ethnicity_simp = case_when(
+                                    str_detect(ethn_dv, "_and_|mixed")                                 ~ "mixed_or_multiple",
+                                    str_detect(ethn_dv, "bangladeshi|pakistani|chinese|asian|indian")  ~ "asian",
+                                    str_detect(ethn_dv, "african|caribbean|black")                     ~ "black",
+                                    str_detect(ethn_dv, "british|gypsy|white|irish")                   ~ "white",
+                                    str_detect(ethn_dv, "arab|other")                                  ~ "other"),
+         new_workplace_or_employer = case_when(wkplsam == "no" ~ "yes",
+                                               jbsamr == "no"  ~ "yes"),
+         moved = case_when(adcts == "no"       ~ "yes",
+                           addrmov_dv == "yes" ~ "yes")) %>%
+  select(pidp,                                                                      # Identifier
+         wave, month = intdatm_dv, year = intdaty_dv,                               # Time-related vars
+         region = gor_dv, age = age_dv, sex = sex_dv, ethnicity_simp,               # Static vars (shouldn't change)
+         commute_status_detailed, commute_status_simp,                              # Commuting vars
+         jbstat, ns_sec = jbnssec8_dv, new_workplace_or_employer, moved) %>%        # Context vars
+  filter(!is.na(commute_status_simp))                                               # Filter out any rows without a commuting status
+```
+
+Things to do ...
+- Specify which values are static, events or changing in the initial table.
+- Create a set of events (e.g. changed region).
+- 
+
+
+```{r}
+static_vars <- c("pidp", "sex", "ethnicity_simp")
+
+# Expand the waves so that missing ones are present (this avoids streaks looking across 'last' available values)
+expand_waves <- function(x) {
+  min_wave <- which(letters == min(x$wave))
+  max_wave <- which(letters == max(x$wave))
+  
+  tibble(wave = letters[min_wave:max_wave]) %>%
+    left_join(x, by = "wave") %>%
+    replace_na(list(commute_status_simp = "missing")) 
+}
+
+look_back <- function(y) {
+  y %>%
+    mutate(ns_sec_last                  = lag(ns_sec, 1),
+           ns_sec_next                  = lead(ns_sec, 1),
+           region_last                  = lag(region, 1),
+           region_next                  = lead(region, 1),
+           commute_status_simp_last     = lag(commute_status_simp, 1),
+           commute_status_simp_next     = lead(commute_status_simp, 1),
+           commute_status_detailed_last = lag(commute_status_detailed, 1),
+           commute_status_detailed_next = lead(commute_status_detailed, 1),           
+           year_last                    = lag(year, 1),
+           year_next                    = lead(year, 1),
+           month_last                   = lag(month, 1),
+           year_next                    = lead(month, 1),
+           renewed     = case_when(is.na(commute_status_simp)                           ~ as.logical(NA),
+                                   is.na(lead(commute_status_simp, 1))                  ~ as.logical(NA),
+                                   lead(commute_status_simp, 1) == "missing"            ~ as.logical(NA),
+                                   commute_status_simp == lead(commute_status_simp, 1)  ~ TRUE,
+                                   commute_status_simp != lead(commute_status_simp, 1)  ~ FALSE),
+           new         = case_when(is.na(commute_status_simp)                           ~ as.logical(NA),
+                                   is.na(lag(commute_status_simp, 1))                   ~ as.logical(NA),
+                                   lag(commute_status_simp, 1) == "missing"             ~ as.logical(NA),
+                                   commute_status_simp  != lag(commute_status_simp, 1)  ~ TRUE,
+                                   commute_status_simp  == lag(commute_status_simp, 1)  ~ FALSE))
+}
+
+nested_data <- simplified_data %>%
+  group_by(across(static_vars)) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(data = map(data, expand_waves),
+         data = map(data, look_back))
+```
+
+Now, we should be able to see the renewal rate of each mode at each wave ...
+
+```{r}
+css_to_remove <- c("missing", "not_in_employment", "other")
+
+renewal_summary <- nested_data %>%
+  unnest(data) %>%
+  filter(!commute_status_simp %in% css_to_remove,
+         commute_status_simp_next != "not_in_employment",
+         !is.na(renewed)) %>%
+  group_by(year, commute_status_simp, renewed, commute_status_simp_next) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(year, commute_status_simp) %>%
+  mutate(prop = n / sum(n),
+         prop = round(prop * 100, 2)) %>%
+  ungroup()
+```
+
+Prepare functions for summaries ...
+
+```{r}
+make_nice_vals <- function(x) {
+  x %>%
+    mutate(across(where(is.character), ~ str_to_sentence(str_replace_all(.x, "_", " "))))
+}
+
+make_nice_vars <- function(x) {
+  x %>%
+    rename_with(~ .x %>% str_to_sentence() %>% str_replace_all("_", " "))
+}
+
+prop_of <- function(x, of_what) {
+  x %>%
+  group_by(year, {{ of_what }}) %>%
+  mutate(percent = n / sum(n),
+         percent = round(percent * 100, 1)) %>%
+  ungroup()
+}
+```
+
+Plot ...
+
+```{r fig.width = 15, fig.height = 15}
+data_for_plot <- renewal_summary %>%
+  make_nice_vals %>%
+  filter(year != 2019)
+
+ggplot(data = data_for_plot, aes(x = year, y = prop, group = commute_status_simp_next)) +
+  geom_line(aes(col = commute_status_simp_next), alpha = 0.5, lwd = 1.5) +
+  scale_x_continuous(breaks = seq(min(data_for_plot$year), max(data_for_plot$year), 2)) +
+  scale_y_continuous(limits = c(0, 100)) +
+  facet_wrap(~ commute_status_simp) +
+  theme_minimal()
+```
+
+Group by year, ethnicity, commute mode ...
+
+```{r fig.width = 15, fig.height = 15}
+ethnicity_summary <- nested_data %>%
+  unnest(data) %>%
+  filter(!commute_status_simp %in% css_to_remove,
+         year < 2019,
+         region != "london",
+         !is.na(ethnicity_simp)) %>%
+  group_by(year, ethnicity_simp, commute_status_simp) %>%
+  tally() %>%
+  ungroup %>%
+  group_by(year, commute_status_simp) %>%
+  mutate(prop = n / sum(n),
+         prop = round(prop * 100, 2)) %>%
+  ungroup() %>%
+  make_nice_vals
+
+ggplot(data = ethnicity_summary, aes(x = year, y = prop, fill = ethnicity_simp)) +
+  geom_col() +
+  facet_wrap(~ commute_status_simp)
+```
+
+
+
+```{r fig.width = 15, fig.height = 15}
+white_man_summary <- nested_data %>%
+  unnest(data) %>%
+  mutate(is_white_man = if_else(sex == "male" & ethnicity_simp == "white", "white_man", "not_white_man")) %>%
+  filter(!commute_status_simp %in% css_to_remove,
+         year < 2019,
+         !is.na(is_white_man)) %>%
+  group_by(year, commute_status_simp, is_white_man) %>%
+  tally() %>%
+  ungroup() %>%
+  prop_of(of_what = commute_status_simp) %>%
+  make_nice_vals
+
+ggplot(data = white_man_summary, aes(x = year, y = percent, fill = is_white_man)) +
+  geom_col() +
+  facet_wrap(~ commute_status_simp) +
+  theme_minimal()
+```
+
+
+
+
+Check number of people in each group when grouped by year ...
+
+```{r}
+test <- renewal_summary %>%
+  arrange(commute_status_simp, commute_status_simp_next, intdaty_dv)
+```
+
+Who started cycling?
+
+```{r}
+nested_data %>%
+  mutate(first_cycling_year = map(data, ~ .x %>% filter(commute_status_simp == "cycle") %>%
+                                                           pull(intdaty_dv) %>%
+                                                           first()))
+```
+
